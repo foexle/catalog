@@ -1,0 +1,6 @@
+dependencies:
+- name: runai-control-plane
+  repository: oci://ghcr.io/k0rdent/charts
+  version: 0.2.0
+digest: sha256:0dd3e8ea746632f98dbae83adb3e4907c4275fe1095a35c29cb07269685441f7
+generated: "2025-11-04T09:58:19.267414+01:00"

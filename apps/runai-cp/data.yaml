@@ -16,40 +16,164 @@ description: |
 support_link: https://www.nvidia.com/en-gb/software/run-ai/
 support_type: Enterprise
 
-deploy_code: |
-  ~~~yaml
-  kind: MultiClusterService
-  metadata:
-    name: run-ai-cp
-  spec:
-    clusterSelector:
-      matchLabels:
-        group: runai-cp
-    serviceSpec:
-      services:
-      - template: runai-cp-0-1-0
-        name: runai-cp
-        namespace: runai-backend
-        values: |
-          license: <BASE64 dockerconfigjson> # provided by NVIDIA
-          clusterIssuer:
-            name: <issuer-name>
-            privateKeySecretRef:
-              name: <key-name>
-            ingressClassName: nginx
-          control-plane:
-            global:
-              domain: runai.mydomain.com
-              ingress:
-                extraAnnotations:
-                  cert-manager.io/cluster-issuer: <issuer-name>
-          knative:
-            domain:
-              runai.mydomain.com: ""
+charts:
+  - name: runai-control-plane 
+    versions: ['0.2.0']
+
+prerequisites: |
+  **run:AI prerequisites**:
+
+  * [K0rdent - 1.4.0](https://docs.k0rdent.io/v1.4.0/admin/installation/install-k0rdent/) 
+  * [run:AI license](https://www.nvidia.com/en-us/software/run-ai/)
+  * Istio
+  * [NVIDIA GPU Operator](https://catalog.k0rdent.io/latest/apps/nvidia/)
+  * CSI & storageclass with ReadWriteMany capabilities (here we used for PoC purposes openEBS + NFS)
+  * [CertManager](https://catalog.k0rdent.io/latest/apps/cert-manager)
+  * [NGINX Ingress](https://github.com/kubernetes/ingress-nginx)
+  * [KNative-Operator](https://github.com/knative/operator)
+  * [Prometheus Stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack)
+  * Node Labels:
+      * GPU: runai-gpu-worker
+      * System: runai-system
+      * CPU: runai-cpu-worker
+
+  > **Note!**
+  >
+  > The KNative operator enables the deployment and configuration of KNative-serving.
+  >
+  > Also for proper wildcard certificate issuing it's required to configure DNS01 issuer with cert-manager and letsencrypt.
+
+
+  Please refer for more requirements the official [run:AI documentation](https://run-ai-docs.nvidia.com/self-hosted/getting-started/installation/install-using-helm/cp-system-requirements)
+
+  **Tested on**:
+
+  * AWS
+  * NVIDIA L40s GPUs
+  * Ubuntu 22.04
+
+verify_code: |
+  ~~~bash
+    kubectl get servicetemplates -A
+    # NAMESPACE    NAME                            VALID
+    # runai-dev    runai-control-plane-0-2-0       true
   ~~~
 
+deploy_code: |
+  ~~~yaml
+  kind: ConfigMap
+  apiVersion: v1
+  metadata:
+    name: runai-control-plane
+    namespace: runai-dev
+  data:
+    runai-values: |
+      license: <BASE64 encoded license>
+      clusterIssuer:
+        name: letsencrypt-prod
+        server: https://acme-v02.api.letsencrypt.org/directory
+        privateKeySecretRef:
+          name: letsencrypt-prod
+        solvers:
+          - dns01:
+              route53:
+                region: eu-north-1
+                accessKeyIDSecretRef:
+                  name: prod-route53-credentials-secret # Secret you need to create upfront or via servicetemplate and secret delegation
+                  key: AccessKeyID
+                secretAccessKeySecretRef:
+                  name: prod-route53-credentials-secret # Secret you need to create upfront or via servicetemplate and secret delegation
+                  key: SecretAccessKey
+            selector:
+              dnsNames:
+                - "runai.example.com"
+                - "*.runai.example.com"
+      control-plane:
+        global:
+          domain: runai.example.com
+          ingress:
+            extraAnnotations:
+              cert-manager.io/cluster-issuer: letsencrypt-prod
+      knative:
+        domain:
+          runai.example.com: ""
+  ~~~
+  
+  
+  ~~~yaml
+  apiVersion: k0rdent.mirantis.com/v1beta1
+  kind: ClusterDeployment
+  metadata:
+    name: run-ai-dev
+    namespace: runai-dev
+  spec: 
+    config:
+      clusterLabels:
+        group: run-ai-dev
+        type: aws
+    [...]
+    serviceSpec:
+      services:
+      - name: gpu-operator
+        namespace: gpu-operator
+        template: gpu-operator-24-9-2
+        values: |
+          gpu-operator:
+            operator:
+              defaultRuntime: containerd
+            toolkit:
+              env:
+                - name: CONTAINERD_CONFIG
+                  value: /etc/k0s/containerd.d/nvidia.toml
+                - name: CONTAINERD_SOCKET
+                  value: /run/k0s/containerd.sock
+                - name: CONTAINERD_RUNTIME_CLASS
+                  value: nvidia
+            # optionally, create DCGM-Exporter ServiceMonitor
+            dcgmExporter:
+              serviceMonitor:
+                enabled: true
+                interval: 15s
+                honorLabels: true
+                additionalLabels: {}
+      - name: nginx
+        namespace: ingress-nginx
+        template: ingress-nginx-4-13-2
+      - name: prod-route53-credentials-secret
+        namespace: cert-manager
+        template: aws-secret-cert-manager
+      - name: cert-manager
+        namespace: cert-manager
+        template: cert-manager-1-18-2
+        values: |
+          cert-manager:
+            crds:
+              enabled: true
+      - name: prometheus
+        namespace: monitoring
+        template: prometheus-stack-77-0-0
+        values: |
+          grafana:
+            enabled: false
+      - name: knative-operator
+        namespace: knative-operator
+        template: knative-operator-1-19-0
+      - name: runai-backend
+        namespace: runai-backend
+        template: runai-service-template-cp-0.2.0
+        valuesFrom:
+          - kind: ConfigMap
+            name: runai-control-plane
+  ~~~
+
+  > **Please Note!**
+  >
+  > The runai Helm Chart is only a meta helm chart. It requires CRDs of the other listed services above
+  > and cannot be installed alone. The dependencies are listed in the clsuter deployment not in the chart itself!
+
+
 doc_link: https://run-ai-docs.nvidia.com/
-show_install_tab: false
+show_install_tab: true
 use_ingress: true
 
 # test settings
@@ -57,8 +181,8 @@ test_deploy_chart: false
 test_deploy_multiclusterservice: false
 test_install_servicetemplates: false
 
-validated_amd64: '-'
-validated_aws: '-'
+validated_amd64: '+'
+validated_aws: '+'
 validated_azure: '-'
 validated_arm64: '-'
 validated_local: '-'
